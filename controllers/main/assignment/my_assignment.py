@@ -1,6 +1,7 @@
 import numpy as np
 import time
 import cv2
+import assignment.drone_vision as dv
 
 # The available ground truth state measurements can be accessed by calling sensor_data[item]. All values of "item" are provided as defined in main.py within the function read_sensors. 
 # The "item" values that you may later retrieve for the hardware project are:
@@ -35,5 +36,15 @@ def get_command(sensor_data, camera_data, dt):
 
     # ---- YOUR CODE HERE ----
     control_command = [sensor_data['x_global'], sensor_data['y_global'], 1.0, sensor_data['yaw']]
+
+    drawing_frame = camera_data.copy()
+
+    #drawing_frame = dv.purple_mask(drawing_frame)
+    #drawing_frame = dv.draw_rectangle(drawing_frame, dv.detect_rectangle(camera_data))
+    drawing_frame = dv.draw_parallelogram(drawing_frame, dv.detect_parallelogram(camera_data))
+
+    cv2.imshow("Camera", drawing_frame)
+    cv2.waitKey(1)
+    
     
     return control_command # Ordered as array with: [pos_x_cmd, pos_y_cmd, pos_z_cmd, yaw_cmd] in meters and radians
