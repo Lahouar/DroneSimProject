@@ -34,6 +34,7 @@ camera_params = {
 
 frames = []
 poses = []
+nb_frames = 3
 
 def get_command(sensor_data, camera_data, dt):
 
@@ -59,7 +60,7 @@ def get_command(sensor_data, camera_data, dt):
         global frames, poses
 
         # Always store the last 3 frames and their corresponding poses
-        if len(frames) >= 3:
+        if len(frames) >= nb_frames:
             frames.pop(0)  # Remove the oldest frame
             poses.pop(0)   # Remove the oldest pose
 
@@ -75,7 +76,7 @@ def get_command(sensor_data, camera_data, dt):
         # Store the pose as a tuple of position and quaternion
         poses.append((position, quaternion))
 
-        if len(frames) == 3:
+        if len(frames) == nb_frames:
             center_3d = tr.triangulate_parallelogram_center(frames, poses, camera_params)
 
             # After calculating center_3d, project it back to the current camera view
