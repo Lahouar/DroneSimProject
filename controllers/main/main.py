@@ -3,6 +3,7 @@ import sys
 print("You are using python at this location:", sys.executable)
 
 import numpy as np
+import math
 from controller import Supervisor, Keyboard
 from exercises.ex1_pid_control import quadrotor_controller
 from exercises.ex2_kalman_filter import kalman_filter as KF
@@ -15,6 +16,7 @@ import lib.mapping_and_planning_examples as mapping_and_planning_examples
 import time, random
 import threading
 import cv2
+from assignment.target_manager import target_point
 
 exp_num = 4                    # 0: Coordinate Transformation, 1: PID Tuning, 2: Kalman Filter, 3: Motion Planning, 4: Project
 control_style = 'path_planner'      # 'keyboard' or 'path_planner'
@@ -719,6 +721,7 @@ if __name__ == '__main__':
                         # Call the PID controller to get the motor commands
                         motorPower = drone.PID_CF.setpoint_to_pwm(drone.dt_ctrl, setpoint, sensor_data)
 
+
                     else:
 
                         # Read the camera feed
@@ -732,6 +735,9 @@ if __name__ == '__main__':
                         # Call the PID controller to get the motor commands
                         motorPower = drone.PID_CF.setpoint_to_pwm(drone.dt_ctrl, current_setpoint, latest_sensor_data)
                         # motorPower = drone.PID_CF.setpoint_to_pwm(dt_ctrl, current_setpoint, latest_sensor_data)
+
+                        #setpoint = [1,1,1,0]
+                        #motorPower = drone.PID_CF.setpoint_to_pwm(drone.dt_ctrl, setpoint, latest_sensor_data)
 
                 if exp_num == 4:
                     # Track the progress of the drone through the assignment world

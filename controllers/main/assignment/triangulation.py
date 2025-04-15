@@ -1,5 +1,6 @@
 import numpy as np
 import assignment.drone_vision as dv
+from exercises.ex0_rotations import quaternion2rotmat
 
 
 def triangulate_2lines(P, Q, v1, v2):
@@ -75,7 +76,7 @@ def triangulate_parallelogram_center(frames, camera_poses, camera_params):
     # Triangulate between all unique pairs of views
     for i in range(num_views):
         for j in range(i+1, num_views):
-            point_3d = triangulate_point(
+            point_3d = triangulate_point_2(
                 parallelogram_centers_px[i],
                 parallelogram_centers_px[j],
                 camera_poses[i],
@@ -86,6 +87,67 @@ def triangulate_parallelogram_center(frames, camera_poses, camera_params):
     
     # Return the mean of all triangulated points
     return np.mean(triangulated_points, axis=0)
+
+def triangulate_point_2(pixel_coords1, pixel_coords2, camera_pose1, camera_pose2, camera_params):
+    """Triangulate a 3D point from two pixel coordinates and corresponding camera poses."""
+    # Extract camera parameters
+    W = camera_params['W']
+    H = camera_params['H']
+    FOV = camera_params['FOV']
+    cam_offset = np.array(camera_params['camera_to_body_offset'])
+
+    # Focal length in pixels
+    f_pixels = W / (2 * np.tan(FOV / 2))
+
+    def pixel_to_camera_vector(u, v):
+        u_centered = u - W / 2
+        v_centered = -(v - H / 2)  # y-axis correction
+        return np.array([u_centered, v_centered, f_pixels])
+
+    # Pixel vectors in camera frame
+    v1 = pixel_to_camera_vector(*pixel_coords1)
+    v2 = pixel_to_camera_vector(*pixel_coords2)
+
+    # Camera to body frame rotation (fixed)
+    R_cam_to_body = np.array([
+        [0, -1, 0],   # x_cam = -y_body
+        [0, 0, -1],   # y_cam = -z_body
+        [1, 0, 0]     # z_cam = x_body
+    ])
+
+    # Get rotation matrices from body to world using quaternion2rotmat
+    R_body_to_world1 = quaternion2rotmat(camera_pose1[1])
+    R_body_to_world2 = quaternion2rotmat(camera_pose2[1])
+
+    # Combined camera to world rotation
+    R_c1_to_w = R_body_to_world1 @ R_cam_to_body
+    R_c2_to_w = R_body_to_world2 @ R_cam_to_body
+
+    # Direction vectors in world frame
+    r = R_c1_to_w @ v1
+    s = R_c2_to_w @ v2
+
+    # Camera positions in world frame
+    body_pos1 = np.array(camera_pose1[0])
+    body_pos2 = np.array(camera_pose2[0])
+
+    P = body_pos1 + R_body_to_world1 @ cam_offset
+    Q = body_pos2 + R_body_to_world2 @ cam_offset
+
+    # Solve for scalars λ and μ using least squares
+    A = np.column_stack((-r, s))
+    b = Q - P
+    try:
+        lambdas = np.linalg.lstsq(A, b, rcond=None)[0]
+        lambda_, mu = lambdas[0], lambdas[1]
+    except np.linalg.LinAlgError:
+        lambda_, mu = 1.0, 1.0  # Fallback if singular
+
+    F = P + lambda_ * r
+    G = Q + mu * s
+
+    return (F + G) / 2
+
 
 def triangulate_point(pixel_coords1, pixel_coords2, camera_pose1, camera_pose2, camera_params):
     """ (Same implementation as before) """
@@ -145,7 +207,7 @@ def triangulate_point(pixel_coords1, pixel_coords2, camera_pose1, camera_pose2, 
     Q = body_pos2 + R_body_to_world2 @ cam_offset
     
     # Solve for lambda and mu using least squares
-    A = np.column_stack((r, -s))
+    A = np.column_stack((-r, s))
     b = Q - P
     try:
         lambdas = np.linalg.lstsq(A, b, rcond=None)[0]
