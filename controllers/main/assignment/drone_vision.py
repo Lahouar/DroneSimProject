@@ -37,6 +37,23 @@ def detect_rectangle(frame):
 
     return bounding_rect
 
+def purple_color_detected(frame, pixel_threshold=500):
+    """
+    Checks if the purple-pinkish color is present in the frame
+    based on a pixel count threshold.
+    
+    Parameters:
+    - frame: BGR image (np.ndarray)
+    - pixel_threshold: Minimum number of mask pixels to count as detected
+    
+    Returns:
+    - bool: True if color detected, False otherwise
+    """
+    mask = purple_mask(frame)
+    pixel_count = cv2.countNonZero(mask)
+    return pixel_count > pixel_threshold
+
+
 def detect_parallelogram(frame):
     mask = purple_mask(frame)
 

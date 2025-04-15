@@ -34,6 +34,8 @@ camera_params = {
         'camera_to_body_offset': [0.03, 0, 0.01]  # Camera position in body frame
     }
 
+S_WIDTH = 300
+S_HEIGHT = 300
 frames = []
 poses = []
 nb_frames = 2
@@ -43,20 +45,21 @@ right_scan = False
 left_scan = False
 center_aligned = False
 go_forward = False
+takeoff = False
 
 def get_command(sensor_data, camera_data, dt):
 
     global frames, poses, control_command, right_scan, left_scan, center_aligned, go_forward
     # NOTE: Displaying the camera image with cv2.imshow() will throw an error because GUI operations should be performed in the main thread.
     # If you want to display the camera image you can call it main.py.
-
+    global takeoff
     # Take off example
-    if sensor_data['z_global'] < 1:
+    if sensor_data['z_global'] < 1 and not takeoff:
         control_command = [sensor_data['x_global'], sensor_data['y_global'], 1.1, sensor_data['yaw']]
         return control_command
 
     # ---- YOUR CODE HERE ----
-
+    takeoff = True
     # Position (x, y, z)
     position = [sensor_data["x_global"], sensor_data["y_global"], sensor_data["z_global"]]
 
@@ -77,6 +80,24 @@ def get_command(sensor_data, camera_data, dt):
     drawing_frame = dv.draw_parallelogram(drawing_frame, dv.detect_parallelogram(camera_data))
     parallelogram = dv.detect_parallelogram(camera_data)
 
+    if not(dv.purple_color_detected(drawing_frame, pixel_threshold= 50)):
+        # No parallelogram detected, reset the flags
+        right_scan = False
+        left_scan = False
+        center_aligned = False
+        go_forward = False
+        return rotate(sensor_data, 45)  # Rotate to search for the parallelogram
+    
+    if parallelogram is None:
+        # No parallelogram detected, reset the flags
+        right_scan = False
+        left_scan = False
+        center_aligned = False
+        go_forward = False
+        return move_right(sensor_data, 50)  # Move right to search for the parallelogram
+
+    cv2.imshow("Camera", drawing_frame)
+    cv2.waitKey(1)  # Add a small delay to allow the image to be displayed
     if parallelogram is not None:
         # Calculate the centroid of the parallelogram in pixel coordinates
         points = parallelogram.reshape(-1, 2)
@@ -85,7 +106,7 @@ def get_command(sensor_data, camera_data, dt):
         
 
         if centroid is not None and not center_aligned:
-            print("distance = ", abs(centroid[0] - sensor_data['z_global']))
+            #print("distance = ", abs(centroid[0] - sensor_data['z_global']))
             center_aligned = True
             return align_center(centroid, sensor_data, camera_data)
         
@@ -93,13 +114,25 @@ def get_command(sensor_data, camera_data, dt):
         if go_forward and center_aligned:
             return move_towards_camera_point(sensor_data, centroid, camera_data, 0.5)
         
-        if center_aligned and paral_slope(parallelogram) < 0:
+        slope = paral_slope(parallelogram)  
+        print("Slope: ", slope)
+        
+        if center_aligned and slope < 0:
             center_aligned = False
             go_forward = True
-            return move_right(sensor_data, 2)
-        elif center_aligned and paral_slope(parallelogram) > 0:
+            slope_coeff = 15 * slope
+            #return move_right(sensor_data, slope_coeff)
+            return move_right_PID(sensor_data, distance= slope_coeff)
+        elif center_aligned and slope > 0:
             center_aligned = False
-            return move_left(sensor_data, 0.5)
+            go_forward = True
+            slope_coeff = 15 * slope
+            #return move_left(sensor_data, slope_coeff)
+            return move_left_PID(sensor_data, distance= slope_coeff)
+        elif slope == 0:
+            center_aligned = False
+            go_forward = True
+            return move_towards_camera_point(sensor_data, centroid, camera_data, 0.5)
             
 
         # if centroid is not None and abs(centroid[0] - sensor_data['z_global']) < 130:
@@ -248,6 +281,60 @@ def move_towards_camera_point(sensor_data, camera_point, camera_data, speed=0.5)
 
     return control_command
 
+def rotate(sensor_data, angle):
+    """
+    Rotates the drone by a specified angle.
+
+    Args:
+        sensor_data: Dictionary containing the current sensor data.
+        angle: Angle in degrees to rotate.
+
+    Returns:
+        control_command: List containing the control command [x, y, z, yaw].
+    """
+
+    alpha = np.deg2rad(angle) 
+
+    x = sensor_data['x_global']
+    y = sensor_data['y_global']
+    z = sensor_data['z_global']
+    yaw = sensor_data['yaw'] + alpha
+
+    # Ensure yaw is within [-pi, pi]
+    yaw = (yaw + np.pi) % (2 * np.pi) - np.pi
+
+    control_command = [x, y, z, yaw]
+
+    return control_command
+
+def move_right_and_rotate(sensor_data, distance=0.5, angle=45):
+    """
+    Moves the drone right and rotates it by a specified angle.
+
+    Args:
+        sensor_data: Dictionary containing the current sensor data.
+        distance: Distance to move right (default is 0.5).
+        angle: Angle in degrees to rotate (default is 45).
+
+    Returns:
+        control_command: List containing the control command [x, y, z, yaw].
+    """
+    # Move right
+    x = sensor_data['x_global'] + distance * np.sin(sensor_data['yaw'])
+    y = sensor_data['y_global'] - distance * np.cos(sensor_data['yaw'])
+    z = sensor_data['z_global']
+    
+    # Rotate
+    alpha = np.deg2rad(angle)
+    yaw = sensor_data['yaw'] + alpha
+
+    # Ensure yaw is within [-pi, pi]
+    yaw = (yaw + np.pi) % (2 * np.pi) - np.pi
+
+    control_command = [x, y, z, yaw]
+
+    return control_command
+
 def paral_slope(parallelogram_points):
     """
     Calculates the slope of the upper side of a given parallelogram.
@@ -278,4 +365,72 @@ def paral_slope(parallelogram_points):
     slope = (y2 - y1) / (x2 - x1)
     return slope
 
+def PID_command(center, angle, sensor_data):
+    """
+    Generates a PID control command based on the detected center of the parallelogram and the drone's current state.
 
+    Args:
+        center: Tuple containing the x and y coordinates of the detected center.
+        angle: Angle of the door.
+        sensor_data: Dictionary containing the current sensor data.
+    """
+
+    err_x = center[0] - S_WIDTH / 2
+    err_y = -(center[1] - S_HEIGHT / 2)
+    err_angle = angle
+    print(err_angle)
+    # Proportional gains
+    kp_y = 0.005
+    kp_z = 0.3
+    kp_yaw = 0.005
+    orientation = np.array([sensor_data['roll'], sensor_data['pitch'], sensor_data['yaw']])
+    R = rot.euler2rotmat(orientation)
+    loc = R.T @ np.array([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']])
+    x_local, y_local, z_local = loc[0], loc[1], loc[2]
+    x_pid = x_local + 0.5
+    y_pid = y_local - kp_y * err_angle
+    z_pid = z_local + kp_z * err_y
+    glob = R @ np.array([x_pid, y_pid, z_pid])
+    command_x, command_y, command_z = glob[0], glob[1], glob[2]
+    command_yaw = sensor_data['yaw'] - kp_yaw * err_x
+
+    return [command_x, command_y, command_z, command_yaw]
+
+import numpy as np
+
+def move_right_PID(sensor_data, distance=0.5, kp=1.0):
+    """
+    Move right by applying a control in the drone's local frame, 
+    then transform it to the global frame using orientation.
+    """
+    # Orientation and position
+    orientation = np.array([sensor_data['roll'], sensor_data['pitch'], sensor_data['yaw']])
+    R = rot.euler2rotmat(orientation)  # Rotation matrix from drone body to world
+
+    # Target movement in local frame: +Y (right in body frame)
+    target_local = np.array([0.0, kp * distance, 0.0])  # no change in z, just sidestep right
+    current_pos = np.array([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']])
+
+    # Transform to global frame
+    target_global_offset = R @ target_local
+    target_pos = current_pos + target_global_offset
+
+    # Return target position with current yaw (no rotation change)
+    return [target_pos[0], target_pos[1], target_pos[2], sensor_data['yaw']]
+
+def move_left_PID(sensor_data, distance=0.5, kp=1.0):
+    """
+    Move left by applying a control in the drone's local frame, 
+    then transform it to the global frame using orientation.
+    """
+    orientation = np.array([sensor_data['roll'], sensor_data['pitch'], sensor_data['yaw']])
+    R = rot.euler2rotmat(orientation)
+
+    # Target movement in local frame: -Y (left in body frame)
+    target_local = np.array([0.0, -kp * distance, 0.0])
+    current_pos = np.array([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']])
+
+    target_global_offset = R @ target_local
+    target_pos = current_pos + target_global_offset
+
+    return [target_pos[0], target_pos[1], target_pos[2], sensor_data['yaw']]
