@@ -52,15 +52,18 @@ takeoff = False
 slope_threshold = 0.3
 inside_door = False 
 door_pos = []
+turn_counter = 0
+intial_pos = [0, 0, 0, 0]
 
 def get_command(sensor_data, camera_data, dt):
 
-    global frames, poses, control_command, right_scan, left_scan, center_aligned, go_forward, inside_door, door_pos
+    global frames, poses, control_command, right_scan, left_scan, center_aligned, go_forward, inside_door, door_pos, turn_counter, initial_pos
     # NOTE: Displaying the camera image with cv2.imshow() will throw an error because GUI operations should be performed in the main thread.
     # If you want to display the camera image you can call it main.py.
     global takeoff
     # Take off example
     if sensor_data['z_global'] < 1 and not takeoff:
+        initial_pos = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
         control_command = [sensor_data['x_global'], sensor_data['y_global'], 1.1, sensor_data['yaw']]
         return control_command
 
@@ -82,7 +85,7 @@ def get_command(sensor_data, camera_data, dt):
     if door_pos is not None:
         if len(door_pos) == 5:
             print("Door positions: ", door_pos)
-            return [0,0,0,0]
+            return initial_pos
 
     # Define the drawing frame
     drawing_frame = camera_data.copy()
@@ -91,18 +94,27 @@ def get_command(sensor_data, camera_data, dt):
     drawing_frame = dv.draw_parallelogram(drawing_frame, dv.detect_parallelogram(camera_data))
     parallelogram = dv.detect_parallelogram(camera_data)
 
+    if turn_counter > 30 :
+        # Reset the flags if no parallelogram is detected after 20 turns
+        right_scan = False
+        left_scan = False
+        center_aligned = False
+        go_forward = False
+        return initial_pos
+
     if not(dv.purple_color_detected(drawing_frame, pixel_threshold= 200)):
         # No Purle detected, reset the flags
         right_scan = False
         left_scan = False
         center_aligned = False
         go_forward = False
+        turn_counter += 1
         return rotate(sensor_data, 15)  # Rotate to search for the parallelogram
     elif dv.purple_color_detected(drawing_frame, pixel_threshold= 100000):
         inside_door = True
         door_pos.append([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']]) 
         #return move_towards_camera_point(sensor_data, [S_WIDTH / 2, S_HEIGHT / 2], camera_data, speed=0.5)  # Move towards the center of the camera frame
-    
+
     if parallelogram is None and inside_door:
         # No parallelogram detected, reset the flags
         right_scan = False
@@ -124,6 +136,7 @@ def get_command(sensor_data, camera_data, dt):
 
 
     if parallelogram is not None:
+        turn_counter = 0
         # Calculate the centroid of the parallelogram in pixel coordinates
         points = parallelogram.reshape(-1, 2)
         centroid = np.mean(points, axis=0)
@@ -161,70 +174,9 @@ def get_command(sensor_data, camera_data, dt):
             return move_towards_camera_point(sensor_data, centroid, camera_data, 0.5)
             
 
-        # if centroid is not None and abs(centroid[0] - sensor_data['z_global']) < 130:
-        #     print("distance = ", abs(centroid[0] - sensor_data['z_global']))
-        #     return align_center(centroid, sensor_data, camera_data)
-        # elif not right_scan and not left_scan:
-        #     right_scan = True
-        #     return move_right(sensor_data, 5)
-        # elif right_scan and not left_scan:
-        #     frames.append(camera_data.copy())
-        #     poses.append((position, quaternion))
-        #     left_scan = True
-        #     return move_left(sensor_data, 5)
-        # elif left_scan and right_scan :
-        #     frames.append(camera_data.copy())
-        #     poses.append((position, quaternion))
-        #     right_scan = False
-        #     left_scan = False
-        
-    # Store the pose as a tuple of position and quaternion
-    #poses.append((position, quaternion))
-
     current_pose = ([sensor_data["x_global"], sensor_data["y_global"], sensor_data["z_global"]], 
                     [sensor_data["q_x"], sensor_data["q_y"], sensor_data["q_z"], sensor_data["q_w"]])
 
-    # if len(frames) == nb_frames:
-    #     center_3d = tr.triangulate_parallelogram_center(frames, poses, camera_params)
-
-    #     if center_3d is not None:
-    #         # Draw the center point in the camera frame
-    #         # After calculating center_3d, project it back to the current camera view
-    #         # pixel_coords = tr.project_3d_to_pixel(center_3d, current_pose, camera_params)
-    #         # cv2.circle(drawing_frame, (int(pixel_coords[0]), int(pixel_coords[1])), 5, (0, 255, 0), -1)
-
-    #         # Store the next target for the drone to fly to
-    #         if target_point[0] is None:
-    #             target_point[0] = float(center_3d[0])
-    #             target_point[1] = float(center_3d[1])
-    #             target_point[2] = float(center_3d[2])
-    #             yaw_cmd = np.arctan2(target_point[1], target_point[0])
-    #             print("Target point set:", target_point)
-    #             control_command = [target_point[0], target_point[1], target_point[2], sensor_data['yaw']]
-    #             control_command = rot.rot_body2inertial(control_command, euler_angles, quaternion) 
-    #             control_command = [float(i) for i in control_command]  # Convert to float
-    #             print("Control command:", control_command) 
-    #         else:
-    #         #     # If the target point is already set, check if it needs to be updated
-    #         #     #calculate the difference between center and target point
-    #             diff = np.array(center_3d) - np.array(target_point)
-    #             dist_squared = np.dot(diff, diff)  # Squared distance
-    #         #     #calculate the distance between the drone and the target point
-    #             drone_pos = np.array([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']])
-    #             target_pos = np.array(target_point)
-    #             drone_target_diff = drone_pos - target_pos
-    #             dist_drone = np.linalg.norm(drone_target_diff)  # Euclidean distance
-    #             if dist_squared > 55 : #and dist_drone < 0.1 :
-    #                 target_point[0] = float(center_3d[0])
-    #                 target_point[1] = float(center_3d[1])
-    #                 target_point[2] = float(center_3d[2])
-    #                 yaw_cmd = np.arctan2(target_point[1], target_point[0])
-    #                 print("Target point updated:", target_point)
-    #                 control_command = [target_point[0], target_point[1], target_point[2], sensor_data['yaw']]
-    #                 control_command = rot.rot_body2inertial(control_command, euler_angles, quaternion)
-    #                 control_command = [float(i) for i in control_command]  # Convert to float
-    #                 print("Control command:", control_command) 
-                                 
 
     return [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]  # No movement command
 
