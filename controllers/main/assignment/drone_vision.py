@@ -60,26 +60,26 @@ def detect_parallelogram(frame):
     # Find contours in the mask
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    # Initialize variables to store the largest contour and its approximated parallelogram
-    largest_contour = None
-    largest_area = 0
+    rightmost_center_x = -np.inf
     parallelogram_points = None
 
-    # Loop through each contour and find the largest one that approximates a parallelogram
     for contour in contours:
-        area = cv2.contourArea(contour)
-        if area > largest_area:
-            # Approximate the contour to a polygon
-            epsilon = 0.05 * cv2.arcLength(contour, True)
-            approx = cv2.approxPolyDP(contour, epsilon, True)
+        # Approximate the contour to a polygon
+        epsilon = 0.05 * cv2.arcLength(contour, True)
+        approx = cv2.approxPolyDP(contour, epsilon, True)
 
-            # Check if the approximated polygon has 4 sides (parallelogram)
-            if len(approx) == 4:
-                largest_area = area
-                largest_contour = contour
+        # Check if the approximated polygon has 4 sides (parallelogram)
+        if len(approx) == 4:
+            # Compute the center X of the polygon
+            approx_flat = approx.reshape(4, 2)
+            center_x = np.mean(approx_flat[:, 0])  # Mean of x-coordinates
+
+            if center_x > rightmost_center_x:
+                rightmost_center_x = center_x
                 parallelogram_points = approx
 
     return parallelogram_points
+
 
 
 def draw_rectangle(frame, bounding_rect):

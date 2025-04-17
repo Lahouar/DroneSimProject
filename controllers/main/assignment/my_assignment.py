@@ -1,8 +1,11 @@
 import numpy as np
 import time
 import cv2
-import assignment.drone_vision as dv
-import assignment.triangulation as tr
+import sys
+import os
+sys.path.append(os.path.dirname(__file__))
+import drone_vision as dv
+import triangulation as tr
 import exercises.ex0_rotations as rot
 from assignment.target_manager import target_point
 
@@ -46,10 +49,13 @@ left_scan = False
 center_aligned = False
 go_forward = False
 takeoff = False
+slope_threshold = 0.3
+inside_door = False 
+door_pos = []
 
 def get_command(sensor_data, camera_data, dt):
 
-    global frames, poses, control_command, right_scan, left_scan, center_aligned, go_forward
+    global frames, poses, control_command, right_scan, left_scan, center_aligned, go_forward, inside_door, door_pos
     # NOTE: Displaying the camera image with cv2.imshow() will throw an error because GUI operations should be performed in the main thread.
     # If you want to display the camera image you can call it main.py.
     global takeoff
@@ -73,6 +79,11 @@ def get_command(sensor_data, camera_data, dt):
         frames = []
         poses = []
 
+    if door_pos is not None:
+        if len(door_pos) == 5:
+            print("Door positions: ", door_pos)
+            return [0,0,0,0]
+
     # Define the drawing frame
     drawing_frame = camera_data.copy()
     
@@ -80,30 +91,45 @@ def get_command(sensor_data, camera_data, dt):
     drawing_frame = dv.draw_parallelogram(drawing_frame, dv.detect_parallelogram(camera_data))
     parallelogram = dv.detect_parallelogram(camera_data)
 
-    if not(dv.purple_color_detected(drawing_frame, pixel_threshold= 50)):
+    if not(dv.purple_color_detected(drawing_frame, pixel_threshold= 200)):
+        # No Purle detected, reset the flags
+        right_scan = False
+        left_scan = False
+        center_aligned = False
+        go_forward = False
+        return rotate(sensor_data, 15)  # Rotate to search for the parallelogram
+    elif dv.purple_color_detected(drawing_frame, pixel_threshold= 100000):
+        inside_door = True
+        door_pos.append([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']]) 
+        #return move_towards_camera_point(sensor_data, [S_WIDTH / 2, S_HEIGHT / 2], camera_data, speed=0.5)  # Move towards the center of the camera frame
+    
+    if parallelogram is None and inside_door:
         # No parallelogram detected, reset the flags
         right_scan = False
         left_scan = False
         center_aligned = False
         go_forward = False
-        return rotate(sensor_data, 45)  # Rotate to search for the parallelogram
-    
+        return rotate(sensor_data, 15)
+
     if parallelogram is None:
         # No parallelogram detected, reset the flags
         right_scan = False
         left_scan = False
         center_aligned = False
         go_forward = False
-        return move_right(sensor_data, 50)  # Move right to search for the parallelogram
+        #return rotate(sensor_data, 15)  # Rotate to search for the parallelogram
+        return move_right(sensor_data, distance= 2)  # Move right to search for the parallelogram
+    
+    inside_door = False
 
-    cv2.imshow("Camera", drawing_frame)
-    cv2.waitKey(1)  # Add a small delay to allow the image to be displayed
+
     if parallelogram is not None:
         # Calculate the centroid of the parallelogram in pixel coordinates
         points = parallelogram.reshape(-1, 2)
         centroid = np.mean(points, axis=0)
         cv2.circle(drawing_frame, (int(centroid[0]), int(centroid[1])), 5, (255, 0, 0), -1) 
         
+        slope = paral_slope(parallelogram)  
 
         if centroid is not None and not center_aligned:
             #print("distance = ", abs(centroid[0] - sensor_data['z_global']))
@@ -111,22 +137,22 @@ def get_command(sensor_data, camera_data, dt):
             return align_center(centroid, sensor_data, camera_data)
         
 
-        if go_forward and center_aligned:
+        if go_forward and center_aligned :
             return move_towards_camera_point(sensor_data, centroid, camera_data, 0.5)
         
-        slope = paral_slope(parallelogram)  
+
         print("Slope: ", slope)
         
         if center_aligned and slope < 0:
             center_aligned = False
             go_forward = True
-            slope_coeff = 15 * slope
+            slope_coeff = 2 * abs(slope)
             #return move_right(sensor_data, slope_coeff)
             return move_right_PID(sensor_data, distance= slope_coeff)
         elif center_aligned and slope > 0:
             center_aligned = False
             go_forward = True
-            slope_coeff = 15 * slope
+            slope_coeff = 2 * abs(slope)
             #return move_left(sensor_data, slope_coeff)
             return move_left_PID(sensor_data, distance= slope_coeff)
         elif slope == 0:
@@ -227,7 +253,10 @@ def move_right(sensor_data, distance = 0.5):
 
     control_command = [tar_x, tar_y, sensor_data['z_global'], sensor_data['yaw']]
 
+    #control_command = rot.rot_body2inertial(control_command, [sensor_data['roll'], sensor_data['pitch'], sensor_data['yaw']], [sensor_data['q_x'], sensor_data['q_y'], sensor_data['q_z'], sensor_data['q_w']])
+
     return control_command
+
 
 def move_left(sensor_data, distance = 0.5):
 
@@ -396,7 +425,7 @@ def PID_command(center, angle, sensor_data):
 
     return [command_x, command_y, command_z, command_yaw]
 
-import numpy as np
+
 
 def move_right_PID(sensor_data, distance=0.5, kp=1.0):
     """
