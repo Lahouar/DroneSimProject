@@ -80,6 +80,46 @@ def detect_parallelogram(frame):
 
     return parallelogram_points
 
+def detect_parallelograms(frame):
+    mask = purple_mask(frame)
+
+    # Find contours in the mask
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    parallelograms = []
+
+    for contour in contours:
+        # Approximate the contour to a polygon
+        epsilon = 0.05 * cv2.arcLength(contour, True)
+        approx = cv2.approxPolyDP(contour, epsilon, True)
+
+        # Check if the approximated polygon has 4 sides (potential parallelogram)
+        if len(approx) == 4:
+            parallelograms.append(approx)
+
+    return parallelograms
+
+def get_parallelogram_centers(frame):
+    """
+    Detects parallelograms in the frame and returns their pixel-space centers.
+
+    Args:
+        frame: Image in which to detect parallelograms.
+
+    Returns:
+        List of (x, y) centroids of detected parallelograms in pixel coordinates.
+    """
+    parallelograms = detect_parallelograms(frame)
+    centers = []
+
+    for points in parallelograms:
+        # Reshape to (4, 2) and compute centroid
+        pts = points.reshape(-1, 2)
+        centroid = np.mean(pts, axis=0)
+        centers.append(tuple(centroid))
+
+    return centers
+
 
 
 def draw_rectangle(frame, bounding_rect):

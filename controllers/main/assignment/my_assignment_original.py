@@ -4,9 +4,12 @@ import cv2
 import sys
 import os
 sys.path.append(os.path.dirname(__file__))
+import drone_vision as dv
+import triangulation as tr
 import exercises.ex3_motion_planner as mp
 import exercises.ex1_pid_control as pid
 import exercises.ex0_rotations as rot
+from assignment.target_manager import target_point
 
 # The available ground truth state measurements can be accessed by calling sensor_data[item]. All values of "item" are provided as defined in main.py within the function read_sensors. 
 # The "item" values that you may later retrieve for the hardware project are:
@@ -56,11 +59,10 @@ intial_pos = [0, 0, 0, 0]
 grid_size = 0.25
 bounds = (0, 5, 0, 3, 0, 1.5)
 step = 0
-offset_correct = [[0,0,0]]
 
 def get_command(sensor_data, camera_data, dt):
 
-    global frames, poses, control_command, right_scan, left_scan, center_aligned, go_forward, inside_door, door_pos, turn_counter, initial_pos, grid_size, bounds, step, offset_correct
+    global frames, poses, control_command, right_scan, left_scan, center_aligned, go_forward, inside_door, door_pos, turn_counter, initial_pos, grid_size, bounds, step
     # NOTE: Displaying the camera image with cv2.imshow() will throw an error because GUI operations should be performed in the main thread.
     # If you want to display the camera image you can call it main.py.
     global takeoff
@@ -73,10 +75,6 @@ def get_command(sensor_data, camera_data, dt):
     # ---- YOUR CODE HERE ----
     takeoff = True
     controller = pid.quadrotor_controller(exp_num=3)  # Or 2 or 3 depending on your setup
-
-    if distance(sensor_data, door_pos[-1]) > 0.5 and len(door_pos) <6 and door_pos[0] != [0,0,0]:
-        if len(door_pos)+2 > len(offset_correct):
-            offset_correct.append([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']])
 
     # Position (x, y, z)
     position = [sensor_data["x_global"], sensor_data["y_global"], sensor_data["z_global"]]
@@ -93,29 +91,22 @@ def get_command(sensor_data, camera_data, dt):
 
     if door_pos is not None:
         if len(door_pos) == 5:
-            if offset_correct[0] == [0,0,0] or distance_points(initial_pos, offset_correct[0]) < 0.5:
-                offset_correct.pop(0)
-            waypoints = [offset_correct[0], door_pos[0], offset_correct[1], door_pos[1], offset_correct[2], door_pos[2], offset_correct[3], door_pos[3], offset_correct[4], door_pos[4]]
-            print("Waypoints: ", waypoints)
             print("Door positions: ", door_pos)
-            print("Offset positions: ", offset_correct)
             # door_pos_tuples = [tuple(pos) for pos in door_pos]
             # print("Door positions tuple: ", door_pos_tuples)
             # planner = mp.MotionPlanner3D(door_pos_tuples, [[0,0,0,0,0,0]], bounds, grid_size, (0, 0, 0))
             # trajectory = planner.trajectory_setpoints
             # times = planner.time_setpoints
-
             if step == 0:
-                if distance(sensor_data, initial_pos) < 0.3:
-                    step = step + 1
+                step = 1
                 return initial_pos
             
-            setpoint = [waypoints[step-1][0], waypoints[step-1][1], waypoints[step-1][2], sensor_data['yaw']]
+            setpoint = [door_pos[step-1][0], door_pos[step-1][1], door_pos[step-1][2], 0 ]  # [x, y, z, yaw]
             # dt = 1
             # pwm = controller.setpoint_to_pwm(dt, setpoint, sensor_data)
-            if distance(sensor_data, waypoints[step-1]) < 0.2:
+            if distance(sensor_data, door_pos[step-1]) < 0.2:
                 step = step + 1
-                if step == len(waypoints)+1:
+                if step == len(door_pos)+1:
                     step = 0
             print("Step: ", step)
             # pwm = rot.rot_body2inertial(pwm, euler_angles, quaternion)
@@ -125,8 +116,8 @@ def get_command(sensor_data, camera_data, dt):
     drawing_frame = camera_data.copy()
     
     # Draw the detected parallelogram on the drawing frame
-    # drawing_frame = draw_parallelogram(drawing_frame, detect_parallelogram(camera_data))
-    parallelogram = detect_parallelogram(camera_data)
+    drawing_frame = dv.draw_parallelogram(drawing_frame, dv.detect_parallelogram(camera_data))
+    parallelogram = dv.detect_parallelogram(camera_data)
 
     if turn_counter > 300 :
         # Reset the flags if no parallelogram is detected after 20 turns
@@ -137,7 +128,7 @@ def get_command(sensor_data, camera_data, dt):
         print("Door positions: ", door_pos)
         return initial_pos
 
-    if not(purple_color_detected(drawing_frame, pixel_threshold= 200)):
+    if not(dv.purple_color_detected(drawing_frame, pixel_threshold= 200)):
         # No Purle detected, reset the flags
         right_scan = False
         left_scan = False
@@ -145,13 +136,13 @@ def get_command(sensor_data, camera_data, dt):
         go_forward = False
         turn_counter += 1
         return rotate(sensor_data, 15)  # Rotate to search for the parallelogram
-    elif purple_color_detected(drawing_frame, pixel_threshold= 20000) and not inside_door:
+    elif dv.purple_color_detected(drawing_frame, pixel_threshold= 10000) and not inside_door:
         inside_door = True
         if door_pos[0] == [0,0,0]:
             door_pos[0] = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']]
-        elif distance(sensor_data, door_pos[-1]) > 1:
+        elif distance(sensor_data, door_pos[-1]) > 2:
             door_pos.append([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']]) 
-            return move_towards_camera_point(sensor_data, [S_WIDTH / 2, S_HEIGHT / 2], camera_data, speed=2)  # Move towards the center of the camera frame
+            return move_towards_camera_point(sensor_data, [S_WIDTH / 2, S_HEIGHT / 2], camera_data, speed=0.5)  # Move towards the center of the camera frame
 
     if parallelogram is None and inside_door:
         # No parallelogram detected, reset the flags
@@ -162,7 +153,7 @@ def get_command(sensor_data, camera_data, dt):
         inside_door = False
         return rotate(sensor_data, 15)
 
-    if parallelogram is None and purple_color_detected(drawing_frame, pixel_threshold= 200):
+    if parallelogram is None:
         # No parallelogram detected, reset the flags
         right_scan = False
         left_scan = False
@@ -185,7 +176,7 @@ def get_command(sensor_data, camera_data, dt):
         # cv2.circle(drawing_frame, (int(centroid[0]), int(centroid[1])), 5, (255, 0, 0), -1) 
         # print("centroid = ", centroid)
 
-        return move_towards_camera_point(sensor_data, centroid, camera_data, 0.7)
+        return move_towards_camera_point(sensor_data, centroid, camera_data, 0.5)
         
         # slope = paral_slope(parallelogram)  
         # if center_aligned and slope < -0.5:
@@ -536,7 +527,7 @@ def choose_target(sensor_data, camera_data):
         closest_target: The closest target point to the drone.
     """
 
-    centers = get_parallelogram_centers(camera_data)
+    centers = dv.get_parallelogram_centers(camera_data)
 
     distances = [distance_to_target(sensor_data, center) for center in centers]
     closest_target_index = np.argmin(distances)
@@ -566,117 +557,3 @@ def distance(sensor_data, previous_sensor_data):
     distance = np.sqrt((x_current - x_previous) ** 2 + (y_current - y_previous) ** 2 + (z_current - z_previous) ** 2)
     
     return distance
-
-def distance_points(point1, point2 ):
-    """
-    Calculate the distance between two points in 3D space.
-
-    Args:
-        point1: list containing the coordinates of the first point [x1, y1, z1].
-        point2: list containing the coordinates of the second point [x2, y2, z2].
-    
-    Returns:
-        distance: Distance between the two points.
-    """
-    x1, y1, z1 = point1[0], point1[1], point1[2]
-    x2, y2, z2 = point2[0], point2[1], point2[2]
-
-    distance = np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2 + (z1 - z2) ** 2)
-    
-    return distance
-
-def purple_mask(frame):
-    # Convert the frame to HSV color space
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-
-    # Define the lower and upper bounds for purple color in HSV
-    lower_purple = np.array([140, 60, 60])  # Shifted hue slightly higher
-    upper_purple = np.array([165, 255, 255])  # Extended range toward pink
-
-
-    # Create a mask for purple color
-    mask = cv2.inRange(hsv, lower_purple, upper_purple)
-
-    return mask
-
-def purple_color_detected(frame, pixel_threshold=500):
-    """
-    Checks if the purple-pinkish color is present in the frame
-    based on a pixel count threshold.
-    
-    Parameters:
-    - frame: BGR image (np.ndarray)
-    - pixel_threshold: Minimum number of mask pixels to count as detected
-    
-    Returns:
-    - bool: True if color detected, False otherwise
-    """
-    mask = purple_mask(frame)
-    pixel_count = cv2.countNonZero(mask)
-    return pixel_count > pixel_threshold
-
-def detect_parallelogram(frame):
-    mask = purple_mask(frame)
-
-    # Find contours in the mask
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    rightmost_center_x = -np.inf
-    parallelogram_points = None
-
-    for contour in contours:
-        # Approximate the contour to a polygon
-        epsilon = 0.05 * cv2.arcLength(contour, True)
-        approx = cv2.approxPolyDP(contour, epsilon, True)
-
-        # Check if the approximated polygon has 4 sides (parallelogram)
-        if len(approx) == 4:
-            # Compute the center X of the polygon
-            approx_flat = approx.reshape(4, 2)
-            center_x = np.mean(approx_flat[:, 0])  # Mean of x-coordinates
-
-            if center_x > rightmost_center_x:
-                rightmost_center_x = center_x
-                parallelogram_points = approx
-
-    return parallelogram_points
-
-def detect_parallelograms(frame):
-    mask = purple_mask(frame)
-
-    # Find contours in the mask
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    parallelograms = []
-
-    for contour in contours:
-        # Approximate the contour to a polygon
-        epsilon = 0.05 * cv2.arcLength(contour, True)
-        approx = cv2.approxPolyDP(contour, epsilon, True)
-
-        # Check if the approximated polygon has 4 sides (potential parallelogram)
-        if len(approx) == 4:
-            parallelograms.append(approx)
-
-    return parallelograms
-
-def get_parallelogram_centers(frame):
-    """
-    Detects parallelograms in the frame and returns their pixel-space centers.
-
-    Args:
-        frame: Image in which to detect parallelograms.
-
-    Returns:
-        List of (x, y) centroids of detected parallelograms in pixel coordinates.
-    """
-    parallelograms = detect_parallelograms(frame)
-    centers = []
-
-    for points in parallelograms:
-        # Reshape to (4, 2) and compute centroid
-        pts = points.reshape(-1, 2)
-        centroid = np.mean(pts, axis=0)
-        centers.append(tuple(centroid))
-
-    return centers
