@@ -3,10 +3,9 @@ import time
 import cv2
 import sys
 import os
-sys.path.append(os.path.dirname(__file__))
-import exercises.ex3_motion_planner as mp
-import exercises.ex1_pid_control as pid
-import exercises.ex0_rotations as rot
+# import exercises.ex3_motion_planner as mp
+# import exercises.ex1_pid_control as pid
+# import exercises.ex0_rotations as rot
 
 # The available ground truth state measurements can be accessed by calling sensor_data[item]. All values of "item" are provided as defined in main.py within the function read_sensors. 
 # The "item" values that you may later retrieve for the hardware project are:
@@ -57,10 +56,11 @@ grid_size = 0.25
 bounds = (0, 5, 0, 3, 0, 1.5)
 step = 0
 offset_correct = [[0,0,0]]
+fast_laps = False
 
 def get_command(sensor_data, camera_data, dt):
 
-    global frames, poses, control_command, right_scan, left_scan, center_aligned, go_forward, inside_door, door_pos, turn_counter, initial_pos, grid_size, bounds, step, offset_correct
+    global frames, poses, control_command, right_scan, left_scan, center_aligned, go_forward, inside_door, door_pos, turn_counter, initial_pos, grid_size, bounds, step, offset_correct, fast_laps
     # NOTE: Displaying the camera image with cv2.imshow() will throw an error because GUI operations should be performed in the main thread.
     # If you want to display the camera image you can call it main.py.
     global takeoff
@@ -72,9 +72,9 @@ def get_command(sensor_data, camera_data, dt):
 
     # ---- YOUR CODE HERE ----
     takeoff = True
-    controller = pid.quadrotor_controller(exp_num=3)  # Or 2 or 3 depending on your setup
+    # controller = pid.quadrotor_controller(exp_num=3)  # Or 2 or 3 depending on your setup
 
-    if distance(sensor_data, door_pos[-1]) > 0.5 and len(door_pos) <6 and door_pos[0] != [0,0,0]:
+    if distance(sensor_data, door_pos[-1]) > 0.8 and len(door_pos) <6 and door_pos[0] != [0,0,0]:
         if len(door_pos)+2 > len(offset_correct):
             offset_correct.append([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']])
 
@@ -93,9 +93,19 @@ def get_command(sensor_data, camera_data, dt):
 
     if door_pos is not None:
         if len(door_pos) == 5:
+            if distance(sensor_data, door_pos[-1]) > 0.8:
+                door_pos.append([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']])
+
+ 
+    if door_pos is not None:
+        if len(door_pos) == 6:
             if offset_correct[0] == [0,0,0] or distance_points(initial_pos, offset_correct[0]) < 0.5:
                 offset_correct.pop(0)
-            waypoints = [offset_correct[0], door_pos[0], offset_correct[1], door_pos[1], offset_correct[2], door_pos[2], offset_correct[3], door_pos[3], offset_correct[4], door_pos[4]]
+            waypoints = [door_pos[0], offset_correct[0], offset_correct[1], door_pos[1], offset_correct[2], door_pos[2], offset_correct[3], door_pos[3], offset_correct[4], door_pos[4], door_pos[5]]
+            fast_laps = True
+            waypoints_4D = [wp if len(wp) == 4 else list(wp) + [0.0] for wp in waypoints]
+            command = path_planning(sensor_data, dt, waypoints_4D, tol=0.05)
+            return command
             print("Waypoints: ", waypoints)
             print("Door positions: ", door_pos)
             print("Offset positions: ", offset_correct)
@@ -105,21 +115,20 @@ def get_command(sensor_data, camera_data, dt):
             # trajectory = planner.trajectory_setpoints
             # times = planner.time_setpoints
 
-            if step == 0:
-                if distance(sensor_data, initial_pos) < 0.3:
-                    step = step + 1
-                return initial_pos
+            # if step == 0:
+            #     if distance(sensor_data, initial_pos) < 0.3:
+            #         step = step + 1
+            #     return initial_pos
             
-            setpoint = [waypoints[step-1][0], waypoints[step-1][1], waypoints[step-1][2], sensor_data['yaw']]
-            # dt = 1
-            # pwm = controller.setpoint_to_pwm(dt, setpoint, sensor_data)
-            if distance(sensor_data, waypoints[step-1]) < 0.2:
-                step = step + 1
-                if step == len(waypoints)+1:
-                    step = 0
-            print("Step: ", step)
-            # pwm = rot.rot_body2inertial(pwm, euler_angles, quaternion)
-            return setpoint
+            # setpoint = [waypoints[step-1][0], waypoints[step-1][1], waypoints[step-1][2], sensor_data['yaw']]
+            # # pwm = controller.setpoint_to_pwm(dt, setpoint, sensor_data)
+            # if distance(sensor_data, waypoints[step-1]) < 0.2:
+            #     step = step + 1
+            #     if step == len(waypoints)+1:
+            #         step = 0
+            # print("Step: ", step)
+            # # pwm = rot.rot_body2inertial(pwm, euler_angles, quaternion)
+            # return setpoint
 
     # Define the drawing frame
     drawing_frame = camera_data.copy()
@@ -145,11 +154,11 @@ def get_command(sensor_data, camera_data, dt):
         go_forward = False
         turn_counter += 1
         return rotate(sensor_data, 15)  # Rotate to search for the parallelogram
-    elif purple_color_detected(drawing_frame, pixel_threshold= 20000) and not inside_door:
+    elif purple_color_detected(drawing_frame, pixel_threshold= 25000) and not inside_door:
         inside_door = True
         if door_pos[0] == [0,0,0]:
             door_pos[0] = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']]
-        elif distance(sensor_data, door_pos[-1]) > 1:
+        elif distance(sensor_data, door_pos[-1]) > 1.5:
             door_pos.append([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']]) 
             return move_towards_camera_point(sensor_data, [S_WIDTH / 2, S_HEIGHT / 2], camera_data, speed=2)  # Move towards the center of the camera frame
 
@@ -185,7 +194,15 @@ def get_command(sensor_data, camera_data, dt):
         # cv2.circle(drawing_frame, (int(centroid[0]), int(centroid[1])), 5, (255, 0, 0), -1) 
         # print("centroid = ", centroid)
 
-        return move_towards_camera_point(sensor_data, centroid, camera_data, 0.7)
+        if is_center_aligned(centroid, camera_data):
+            return move_towards_camera_point(sensor_data, centroid, camera_data, 0.7)
+
+        if centroid is not None:
+            #center_aligned = True
+            return align_center(centroid, sensor_data, camera_data)
+        
+
+        
         
         # slope = paral_slope(parallelogram)  
         # if center_aligned and slope < -0.5:
@@ -219,7 +236,7 @@ def get_command(sensor_data, camera_data, dt):
         #     return move_towards_camera_point(sensor_data, centroid, camera_data, 0.5)
         
 
-        print("Slope: ", slope)
+        # print("Slope: ", slope)
         
         
             
@@ -236,12 +253,20 @@ def align_center(center, sensor_data, camera_data):
     yaw_err = err[0] / f_pixel 
     yaw = sensor_data['yaw'] - Kp_yaw * yaw_err
     yaw = np.clip(yaw, -np.pi, np.pi)
-    Kp_z = 0.01
+    Kp_z = 0.2
     z_err = err[1]
     z = sensor_data['z_global'] - Kp_z * z_err
     z = np.clip(z, 0.2, 2.0)
     control_command = [sensor_data['x_global'], sensor_data['y_global'], z, yaw]
     return control_command
+
+import numpy as np
+
+def is_center_aligned(center, camera_data, threshold_px=100):
+    err_x = center[0] - camera_data.shape[1] / 2
+    err_y = center[1] - camera_data.shape[0] / 2
+    return np.abs(err_x) < threshold_px and np.abs(err_y) < threshold_px
+
 
 
 def move_right(sensor_data, distance = 0.5):
@@ -680,3 +705,63 @@ def get_parallelogram_centers(frame):
         centers.append(tuple(centroid))
 
     return centers
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+import time
+
+on_ground = True
+height_desired = 0.5
+timer = None
+startpos = None
+timer_done = None
+index_current_setpoint = 0
+
+def path_planning(sensor_data, dt, setpoints, tol):
+    global on_ground, height_desired, index_current_setpoint, timer, timer_done, startpos
+
+    dt = dt-0.5
+    # Take off
+    if startpos is None:
+        startpos = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']]
+        # print(startpos)    
+    if on_ground and sensor_data['z_global'] < 0.49:
+        #current_setpoint = [0.97,0.84,height_desired,0]
+        current_setpoint = [startpos[0], startpos[1], height_desired, 0.0]
+        # print(current_setpoint)
+        return current_setpoint
+    else:
+        on_ground = False
+
+    # Start timer
+    if (index_current_setpoint == 1) & (timer is None):
+        timer = 0
+        print("Time recording started")
+    if timer is not None:
+        timer += dt
+    # Hover at the final setpoint
+    if index_current_setpoint == len(setpoints):
+        control_command = [0.0, 0.0, height_desired, 0.0] #[startpos[0], startpos[1], startpos[2]-0.05, 0.0]
+
+        if timer_done is None:
+            timer_done = True
+            print("Path planning took " + str(np.round(timer,1)) + " [s]")
+        return control_command
+
+    # Get the goal position and drone position
+    current_setpoint = setpoints[index_current_setpoint]
+    x_drone, y_drone, z_drone, yaw_drone = sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']
+    distance_drone_to_goal = np.linalg.norm([current_setpoint[0] - x_drone, current_setpoint[1] - y_drone, current_setpoint[2] - z_drone, current_setpoint[3] - yaw_drone%(2*np.pi)])
+
+    # When the drone reaches the goal setpoint, e.g., distance < 0.1m
+    if distance_drone_to_goal < tol:
+        # Select the next setpoint as the goal position
+        index_current_setpoint += 1
+        # Hover at the final setpoint
+        if index_current_setpoint == len(setpoints):
+            index_current_setpoint = 0
+            current_setpoint = setpoints[0]
+            return current_setpoint
+
+    return current_setpoint
