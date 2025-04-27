@@ -5,6 +5,7 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 import time
+import exercises.ex3_motion_planner as mp
 
 # The available ground truth state measurements can be accessed by calling sensor_data[item]. All values of "item" are provided as defined in main.py within the function read_sensors. 
 # The "item" values that you may later retrieve for the hardware project are:
@@ -47,13 +48,17 @@ intial_pos = [0, 0, 0, 0]
 offset_correct = [[0,0,0]]
 path = [[0,0,0]]
 stupid_path = False
+grid_size = 0.1
+bounds = [0, 9, 0, 9, 0, 4]
+plan_path = False
+set_points = None
+time_points = None
 
 def get_command(sensor_data, camera_data, dt):
 
-    global control_command, inside_door, door_pos, turn_counter, initial_pos, offset_correct, fast_laps, stupid_path, path
+    global control_command, inside_door, door_pos, turn_counter, initial_pos, offset_correct, stupid_path, path, bounds, grid_size, takeoff, plan_path, set_points, time_points
     # NOTE: Displaying the camera image with cv2.imshow() will throw an error because GUI operations should be performed in the main thread.
     # If you want to display the camera image you can call it main.py.
-    global takeoff
     # Take off example
     if sensor_data['z_global'] < 1 and not takeoff:
         initial_pos = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
@@ -69,23 +74,40 @@ def get_command(sensor_data, camera_data, dt):
     elif distance(sensor_data, path[-1]) > 0.8:
         path.append([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']])
 
-    if distance(sensor_data, door_pos[-1]) > 0.5 and len(door_pos) <6 and door_pos[0] != [0,0,0]:
+    if distance(sensor_data, door_pos[-1]) > 0.3 and len(door_pos) <6 and door_pos[0] != [0,0,0]:
         if len(door_pos)+2 > len(offset_correct):
             offset_correct.append([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']])
 
     if door_pos is not None:
         if len(door_pos) == 5:
-            if distance(sensor_data, door_pos[-1]) > 0.5:
+            if distance(sensor_data, door_pos[-1]) > 0.3:
                 door_pos.append([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']])
 
- 
+
     if door_pos is not None:
         if len(door_pos) == 6:
             if offset_correct[0] == [0,0,0] or distance_points(initial_pos, offset_correct[0]) < 0.5:
                 offset_correct.pop(0)
             waypoints = [door_pos[0], offset_correct[0], offset_correct[1], door_pos[1], offset_correct[2], door_pos[2], offset_correct[3], door_pos[3], offset_correct[4], door_pos[4], door_pos[5]]
-            waypoints_4D = [wp if len(wp) == 4 else list(wp) + [0.0] for wp in waypoints]
-            command = path_planning(sensor_data, dt, waypoints_4D, tol=0.1)
+            waypoints = add_pre_door_waypoints_pp(waypoints, distance_before=0.5)
+            waypoints.append([initial_pos[0], initial_pos[1], initial_pos[2]])
+            waypoints += waypoints
+            # waypoints.pop(-1)
+            command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
+            if not plan_path:
+                planner = MotionPlanner3D(waypoints, [])
+                set_points = planner.trajectory_setpoints
+                time_points = planner.time_setpoints
+                print("Time setpoints: ", time_points)
+                print("Trajectory setpoints: ", set_points)
+                plan_path = True
+            elif plan_path:
+                command = trajectory_tracking(sensor_data, dt, time_points, set_points, tol=0.2)
+            # waypoints_4D = [wp if len(wp) == 4 else list(wp) + [0.0] for wp in waypoints]
+            # time_step = 0.9  # or whatever you prefer
+            # timepoints = [i * time_step for i in range(len(waypoints_4D))]
+            # command = trajectory_tracking(sensor_data, dt, timepoints, np.array(waypoints_4D), tol=0.2)
+            # command = path_planning(sensor_data, dt, waypoints_4D, tol=0.1)
             return command
     
     if stupid_path:
@@ -150,6 +172,9 @@ def get_command(sensor_data, camera_data, dt):
             return move_towards_camera_point(sensor_data, centroid, camera_data, 0.7)
 
         if centroid is not None:
+            # comm = align_center(centroid, sensor_data, camera_data)
+            # if abs(sensor_data['z_global'] - comm[2]) > 0.3:
+            #     return move_towards_camera_point(sensor_data, centroid, camera_data, 0.3)
             return align_center(centroid, sensor_data, camera_data)           
 
     current_pose = ([sensor_data["x_global"], sensor_data["y_global"], sensor_data["z_global"]], 
@@ -164,7 +189,7 @@ def align_center(center, sensor_data, camera_data):
     yaw_err = err[0] / f_pixel 
     yaw = sensor_data['yaw'] - Kp_yaw * yaw_err
     yaw = np.clip(yaw, -np.pi, np.pi)
-    Kp_z = 0.2
+    Kp_z = 0.1
     z_err = err[1]
     z = sensor_data['z_global'] - Kp_z * z_err
     z = np.clip(z, 0.2, 2.0)
@@ -220,7 +245,7 @@ def move_towards_camera_point(sensor_data, camera_point, camera_data, speed=0.5)
         control_command: List containing the control command [x, y, z, yaw].
     """
     # Proportional control for yaw and z
-    Kp_yaw = 0.5
+    Kp_yaw = 0.6
     Kp_z = 0.01
 
     # Calculate the error in pixel coordinates
@@ -519,3 +544,483 @@ def path_planning(sensor_data, dt, setpoints, tol):
             return current_setpoint
 
     return current_setpoint
+
+def trajectory_tracking(sensor_data, dt, timepoints, setpoints, tol, repeat = True):
+    global on_ground, index_current_setpoint, timer, timer_done
+
+    start_point = setpoints[0]
+    end_point = setpoints[-1]
+
+    # Take off 
+    if on_ground and sensor_data['z_global'] < 0.2:
+        current_setpoint = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'] + 0.5, sensor_data['yaw']]
+        return current_setpoint
+    else:
+        on_ground = False
+        if timer is None:
+            # Begin timer and start trajectory
+            timer = 0
+            print("Trajectory tracking started")
+            index_current_setpoint = 1
+        else:
+            timer += dt
+
+    # Determine the current setpoint based on the time
+    if not on_ground and timer is not None:
+        if index_current_setpoint < len(timepoints) - 1:
+            # Update new setpoint
+            current_setpoint = setpoints[index_current_setpoint,:]
+            if timer >= timepoints[index_current_setpoint] or np.linalg.norm([sensor_data['x_global'] - current_setpoint[0], sensor_data['y_global'] - current_setpoint[1], sensor_data['z_global'] - current_setpoint[2]]) < tol:
+
+                index_current_setpoint += 1
+            current_setpoint = setpoints[index_current_setpoint,:]
+        else:
+            # Hover at the final setpoint
+            current_setpoint = end_point
+            if timer_done is None and np.linalg.norm([sensor_data['x_global'] - end_point[0], sensor_data['y_global'] - end_point[1], sensor_data['z_global'] - end_point[2]]) < tol:
+                timer_done = True
+                print("Trajectory took " + str(np.round(timer,1)) + " [s]")
+                if repeat:
+                    timer_done = None
+                    timer = None
+                
+    return current_setpoint
+
+def add_pre_door_waypoints(waypoints, distance_before=0.3):
+    """
+    Adds a point before each door following the vector door -> offset.
+    
+    Args:
+        waypoints: List of waypoints [door0, offset0, offset1, door1, offset2, door2, ...]
+        distance_before: Distance before each door to add the new point.
+        
+    Returns:
+        new_waypoints: New list with pre-door points added.
+    """
+    new_waypoints = []
+    i = 0
+    while i < len(waypoints) - 1:
+        door = waypoints[i]
+        offset = waypoints[i+1]
+        
+        # Compute vector from door to offset
+        direction = np.array(offset[:3]) - np.array(door[:3])
+        direction_norm = np.linalg.norm(direction)
+        
+        if direction_norm != 0:
+            direction_unit = direction / direction_norm
+        else:
+            direction_unit = np.zeros_like(direction)
+        
+        # Create the pre-door point
+        pre_door = np.array(door[:3]) - distance_before * direction_unit
+        
+        # Add pre-door point, door, and offset to the new list
+        new_waypoints.append(list(pre_door) + [0.0])  # Add yaw 0.0 if needed
+        new_waypoints.append(door if len(door) == 4 else list(door) + [0.0])
+        new_waypoints.append(offset if len(offset) == 4 else list(offset) + [0.0])
+        
+        i += 2  # Move to next door-offset pair
+
+    # Add remaining points if any
+    if i < len(waypoints):
+        for wp in waypoints[i:]:
+            new_waypoints.append(wp if len(wp) == 4 else list(wp) + [0.0])
+    
+    return new_waypoints
+
+def add_pre_door_waypoints_pp(waypoints, distance_before=0.3):
+    """
+    Adds a point before each door following the vector door -> offset, without using numpy.
+    No yaw is added. 
+    After building, swaps the second, third, and fourth elements.
+    
+    Args:
+        waypoints: List of waypoints [door0, offset0, offset1, door1, offset2, door2, ...]
+        distance_before: Distance before each door to add the new point.
+
+    Returns:
+        new_waypoints: New list with pre-door points added and elements swapped.
+    """
+    new_waypoints = []
+    i = 0
+    while i < len(waypoints) - 1:
+        door = waypoints[i]
+        offset = waypoints[i+1]
+        
+        # Compute direction vector (offset - door)
+        dir_x = offset[0] - door[0]
+        dir_y = offset[1] - door[1]
+        dir_z = offset[2] - door[2]
+
+        # Compute the norm (length) of the direction vector
+        norm = (dir_x**2 + dir_y**2 + dir_z**2) ** 0.5
+        
+        if norm != 0:
+            # Normalize direction vector
+            dir_x /= norm
+            dir_y /= norm
+            dir_z /= norm
+        else:
+            dir_x, dir_y, dir_z = 0.0, 0.0, 0.0
+        
+        # Compute the pre-door point (pure 3D)
+        pre_door = [
+            door[0] - distance_before * dir_x,
+            door[1] - distance_before * dir_y,
+            door[2] - distance_before * dir_z
+        ]
+
+        # Add pre-door, door, and offset (without yaw)
+        new_waypoints.append(pre_door)
+        new_waypoints.append(door[:3])    # Only x, y, z
+        new_waypoints.append(offset[:3])  # Only x, y, z
+        
+        i += 2
+
+    # Add any remaining points
+    if i < len(waypoints):
+        for wp in waypoints[i:]:
+            new_waypoints.append(wp[:3])  # Only x, y, z
+
+    # Swap second, third, and fourth elements
+    if len(new_waypoints) >= 4:
+        new_waypoints[1], new_waypoints[2], new_waypoints[3] = new_waypoints[3], new_waypoints[1], new_waypoints[2]
+
+    return new_waypoints
+
+
+def add_pre_door_waypoints_nonp(waypoints, distance_before=0.3):
+    """
+    Adds a point before each door following the vector door -> offset, without using numpy.
+    After building, swaps the first and second elements of the new list.
+    
+    Args:
+        waypoints: List of waypoints [door0, offset0, offset1, door1, offset2, door2, ...]
+        distance_before: Distance before each door to add the new point.
+        
+    Returns:
+        new_waypoints: New list with pre-door points added and first two elements swapped.
+    """
+    new_waypoints = []
+    i = 0
+    while i < len(waypoints) - 1:
+        door = waypoints[i]
+        offset = waypoints[i+1]
+        
+        # Compute direction vector (offset - door)
+        dir_x = offset[0] - door[0]
+        dir_y = offset[1] - door[1]
+        dir_z = offset[2] - door[2]
+
+        # Compute the norm (length) of the direction vector
+        norm = (dir_x**2 + dir_y**2 + dir_z**2) ** 0.5
+        
+        if norm != 0:
+            # Normalize direction vector
+            dir_x /= norm
+            dir_y /= norm
+            dir_z /= norm
+        else:
+            dir_x, dir_y, dir_z = 0.0, 0.0, 0.0
+        
+        # Compute the pre-door point
+        pre_door_x = door[0] - distance_before * dir_x
+        pre_door_y = door[1] - distance_before * dir_y
+        pre_door_z = door[2] - distance_before * dir_z
+        
+        pre_door = [pre_door_x, pre_door_y, pre_door_z, 0.0]  # Add yaw 0.0
+
+        # Add to new waypoints
+        new_waypoints.append(pre_door)
+        new_waypoints.append(door if len(door) == 4 else door + [0.0])
+        new_waypoints.append(offset if len(offset) == 4 else offset + [0.0])
+        
+        i += 2
+
+    # Add any remaining points
+    if i < len(waypoints):
+        for wp in waypoints[i:]:
+            new_waypoints.append(wp if len(wp) == 4 else wp + [0.0])
+
+    # Swap first and second elements
+    if len(new_waypoints) >= 2:
+        new_waypoints[1], new_waypoints[2], new_waypoints[3] = new_waypoints[3], new_waypoints[1], new_waypoints[2]
+
+    return new_waypoints
+
+def add_pre_door_waypoints_with_midpoint(waypoints, distance_before=0.3):
+    """
+    Adds a point before each door following the vector door -> offset, without using numpy.
+    Then adds a midpoint between door and offset.
+    After that, moves the first element to the third position.
+    
+    Args:
+        waypoints: List of waypoints [door0, offset0, offset1, door1, offset2, door2, ...]
+        distance_before: Distance before each door to add the new point.
+        
+    Returns:
+        new_waypoints: New list with pre-door, door, midpoint, offset points added and first element shifted.
+    """
+    new_waypoints = []
+    i = 0
+    while i < len(waypoints) - 1:
+        door = waypoints[i]
+        offset = waypoints[i+1]
+        
+        # Compute direction vector (offset - door)
+        dir_x = offset[0] - door[0]
+        dir_y = offset[1] - door[1]
+        dir_z = offset[2] - door[2]
+
+        # Compute the norm (length) of the direction vector
+        norm = (dir_x**2 + dir_y**2 + dir_z**2) ** 0.5
+        
+        if norm != 0:
+            # Normalize direction vector
+            dir_x /= norm
+            dir_y /= norm
+            dir_z /= norm
+        else:
+            dir_x, dir_y, dir_z = 0.0, 0.0, 0.0
+        
+        # Compute the pre-door point
+        pre_door_x = door[0] - distance_before * dir_x
+        pre_door_y = door[1] - distance_before * dir_y
+        pre_door_z = door[2] - distance_before * dir_z
+        
+        pre_door = [pre_door_x, pre_door_y, pre_door_z, 0.0]  # Add yaw 0.0
+
+        # Compute midpoint between door and offset
+        mid_x = (door[0] + offset[0]) / 2
+        mid_y = (door[1] + offset[1]) / 2
+        mid_z = (door[2] + offset[2]) / 2
+        midpoint = [mid_x, mid_y, mid_z, 0.0]  # Midpoint with yaw 0.0
+
+        # Add in order: pre-door, door, midpoint, offset
+        new_waypoints.append(pre_door)
+        new_waypoints.append(door if len(door) == 4 else door + [0.0])
+        new_waypoints.append(midpoint)
+        new_waypoints.append(offset if len(offset) == 4 else offset + [0.0])
+        
+        i += 2  # Move to next door-offset pair
+
+    # Add any remaining points (rare, for odd cases)
+    if i < len(waypoints):
+        for wp in waypoints[i:]:
+            new_waypoints.append(wp if len(wp) == 4 else wp + [0.0])
+
+    if len(new_waypoints) >= 5:
+        new_waypoints[0], new_waypoints[1], new_waypoints[2], new_waypoints[3], new_waypoints[4] = new_waypoints[0], new_waypoints[4], new_waypoints[1], new_waypoints[2], new_waypoints[3]
+
+    new_waypoints[-1][0] = new_waypoints[-1][0] - 1
+    
+    return new_waypoints
+
+class MotionPlanner3D():
+    
+    #Question: SIMON PID, what is vel_max set for PID? Check should be same here
+    def __init__(self, path, obstacles):
+        # Inputs:
+        # - start: The sequence of input path waypoints provided by the path-planner, including the start and final goal position: Vector of m waypoints, consisting of a tuple with three reference positions each as provided by AStar 
+        # - obstacles: 2D array with obstacle locations and obstacle widths [x, y, z, dx, dy, dz]*n_obs
+        # - bounds: The bounds of the environment [x_min, x_max, y_min, y_max, z_min, z_max]
+        # - grid_size: The grid size of the environment (scalar)
+        # - goal: The final goal position of the drone (tuple of 3) 
+        
+        ## DO NOT MODIFY --------------------------------------------------------------------------------------- ##
+        self.path = path
+
+        self.trajectory_setpoints = None
+
+        self.init_params(self.path)
+
+        self.run_planner(obstacles, self.path)
+
+        # ---------------------------------------------------------------------------------------------------- ##
+
+    def run_planner(self, obs, path_waypoints):
+        # Run the subsequent functions to compute the polynomial coefficients and extract and visualize the trajectory setpoints
+        ## DO NOT MODIFY --------------------------------------------------------------------------------------- ##
+    
+        poly_coeffs = self.compute_poly_coefficients(path_waypoints)
+        self.trajectory_setpoints, self.time_setpoints = self.poly_setpoint_extraction(poly_coeffs, obs, path_waypoints)
+
+        ## ---------------------------------------------------------------------------------------------------- ##
+
+    def init_params(self, path_waypoints):
+
+        # Inputs:
+        # - path_waypoints: The sequence of input path waypoints provided by the path-planner, including the start and final goal position: Vector of m waypoints, consisting of a tuple with three reference positions each as provided by AStar
+
+        # TUNE THE FOLLOWING PARAMETERS (PART 2) ----------------------------------------------------------------- ##
+        self.disc_steps = 12    # Integer number steps to divide every path segment into to provide the reference positions for PID control # IDEAL: Between 10 and 20
+        self.vel_lim = 9.0        # Velocity limit of the drone (m/s)
+        self.acc_lim = 70.0       # Acceleration limit of the drone (m/s²)
+        t_f = 34                # Final time at the end of the path (s)
+
+        # Determine the number of segments of the path
+        self.times = np.linspace(0, t_f, len(path_waypoints)) # The time vector at each path waypoint to traverse (Vector of size m) (must be 0 at start)
+
+    def compute_poly_matrix(self, t):
+        # Inputs:
+        # - t: The time of evaluation of the A matrix (t=0 at the start of a path segment, else t >= 0) [Scalar]
+        # Outputs: 
+        # - The constraint matrix "A_m(t)" [5 x 6]
+        # The "A_m" matrix is used to represent the system of equations [x, \dot{x}, \ddot{x}, \dddot{x}, \ddddot{x}]^T  = A_m(t) * poly_coeffs (where poly_coeffs = [c_0, c_1, c_2, c_3, c_4, c_5]^T and represents the unknown polynomial coefficients for one segment)
+        A_m = np.zeros((5,6))
+        
+        # TASK: Fill in the constraint factor matrix values where each row corresponds to the positions, velocities, accelerations, snap and jerk here
+        # SOLUTION ---------------------------------------------------------------------------------- ## 
+        
+        A_m = np.array([
+            [t**5, t**4, t**3, t**2, t, 1], #pos
+            [5*(t**4), 4*(t**3), 3*(t**2), 2*t, 1, 0], #vel
+            [20*(t**3), 12*(t**2), 6*t, 2, 0, 0], #acc  
+            [60*(t**2), 24*t, 6, 0, 0, 0], #jerk
+            [120*t, 24, 0, 0, 0, 0] #snap
+        ])
+
+        return A_m
+
+    def compute_poly_coefficients(self, path_waypoints):
+        
+        # Computes a minimum jerk trajectory given time and position waypoints.
+        # Inputs:
+        # - path_waypoints: The sequence of input path waypoints provided by the path-planner, including the start and final goal position: Vector of m waypoints, consisting of a tuple with three reference positions each as provided by AStar
+        # Outputs:
+        # - poly_coeffs: The polynomial coefficients for each segment of the path [6(m-1) x 3]
+
+        # Use the following variables and the class function self.compute_poly_matrix(t) to solve for the polynomial coefficients
+        
+        seg_times = np.diff(self.times) #The time taken to complete each path segment
+        m = len(path_waypoints) #Number of path waypoints (including start and end)
+        poly_coeffs = np.zeros((6*(m-1),3))
+
+        # YOUR SOLUTION HERE ---------------------------------------------------------------------------------- ## 
+
+        # 1. Fill the entries of the constraint matrix A and equality vector b for x,y and z dimensions in the system A * poly_coeffs = b. Consider the constraints according to the lecture: We should have a total of 6*(m-1) constraints for each dimension.
+        # 2. Solve for poly_coeffs given the defined system
+
+        for dim in range(3):  # Compute for x, y, and z separately
+            A = np.zeros((6*(m-1), 6*(m-1)))
+            b = np.zeros(6*(m-1))
+            pos = np.array([p[dim] for p in path_waypoints])
+            A_0 = self.compute_poly_matrix(0) # A_0 gives the constraint factor matrix A_m for any segment at t=0, this is valid for the starting conditions at every path segment
+
+            # SOLUTION
+            row = 0
+            for i in range(m-1):
+                pos_0 = pos[i] #Starting position of the segment
+                pos_f = pos[i+1] #Final position of the segment
+                # The prescribed zero velocity (v) and acceleration (a) values at the start and goal position of the entire path
+                v_0, a_0 = 0, 0
+                v_f, a_f = 0, 0
+                A_f = self.compute_poly_matrix(seg_times[i]) # A_f gives the constraint factor matrix A_m for a segment i at its relative end time t=seg_times[i]
+                if i == 0: # First path segment
+                #     # 1. Implement the initial constraints here for the first segment using A_0
+                #     # 2. Implement the final position and the continuity constraints for velocity, acceleration, snap and jerk at the end of the first segment here using A_0 and A_f (check hints in the exercise description)
+                    A[row, i*6:(i+1)*6] = A_0[0] #Initial position constraint
+                    b[row] = pos_0
+                    row += 1
+                    A[row, i*6:(i+1)*6] = A_f[0] #Final position constraint
+                    b[row] = pos_f
+                    row += 1
+                    A[row, i*6:(i+1)*6] = A_0[1] #Initial velocity constraint
+                    b[row] = v_0
+                    row += 1
+                    A[row, i*6:(i+1)*6] = A_0[2] #Initial acceleration constraint
+                    b[row] = a_0
+                    row += 1
+                    #Continuity of velocity, acceleration, jerk, snap
+                    A[row:row+4, i*6:(i+1)*6] = A_f[1:]
+                    A[row:row+4, (i+1)*6:(i+2)*6] = -A_0[1:]
+                    b[row:row+4] = np.zeros(4)
+                    row += 4
+                elif i < m-2: # Intermediate path segments
+                #     # 1. Similarly, implement the initial and final position constraints here for each intermediate path segment
+                #     # 2. Similarly, implement the end of the continuity constraints for velocity, acceleration, snap and jerk at the end of each intermediate segment here using A_0 and A_f
+                    A[row, i*6:(i+1)*6] = A_0[0] #Initial position constraint
+                    b[row] = pos_0
+                    row += 1
+                    A[row, i*6:(i+1)*6] = A_f[0] #Final position constraint
+                    b[row] = pos_f
+                    row += 1
+                    #Continuity of velocity, acceleration, jerk and snap
+                    A[row:row+4, i*6:(i+1)*6] = A_f[1:]
+                    A[row:row+4, (i+1)*6:(i+2)*6] = -A_0[1:]
+                    b[row:row+4] = np.zeros(4)
+                    row += 4
+                elif i == m-2: #Final path segment
+                #     # 1. Implement the initial and final position, velocity and accelerations constraints here for the final path segment using A_0 and A_f
+                    A[row, i*6:(i+1)*6] = A_0[0] #Initial position constraint
+                    b[row] = pos_0
+                    row += 1
+                    A[row, i*6:(i+1)*6] = A_f[0] #Final position constraint
+                    b[row] = pos_f
+                    row += 1
+                    A[row, i*6:(i+1)*6] = A_f[1] #Final velocity constraint
+                    b[row] = v_f
+                    row += 1
+                    A[row, i*6:(i+1)*6] = A_f[2] #Final acceleration constraint
+                    b[row] = a_f
+                    row += 1
+            # Solve for the polynomial coefficients for the dimension dim
+
+            poly_coeffs[:,dim] = np.linalg.solve(A, b)   
+
+        return poly_coeffs
+
+    def poly_setpoint_extraction(self, poly_coeffs, obs, path_waypoints):
+
+        # DO NOT MODIFY --------------------------------------------------------------------------------------- ##
+
+        # Uses the class features: self.disc_steps, self.times, self.poly_coeffs, self.vel_lim, self.acc_lim
+        x_vals, y_vals, z_vals = np.zeros((self.disc_steps*len(self.times),1)), np.zeros((self.disc_steps*len(self.times),1)), np.zeros((self.disc_steps*len(self.times),1))
+        v_x_vals, v_y_vals, v_z_vals = np.zeros((self.disc_steps*len(self.times),1)), np.zeros((self.disc_steps*len(self.times),1)), np.zeros((self.disc_steps*len(self.times),1))
+        a_x_vals, a_y_vals, a_z_vals = np.zeros((self.disc_steps*len(self.times),1)), np.zeros((self.disc_steps*len(self.times),1)), np.zeros((self.disc_steps*len(self.times),1))
+
+        # Define the time reference in self.disc_steps number of segements
+        time_setpoints = np.linspace(self.times[0], self.times[-1], self.disc_steps*len(self.times))  # Fine time intervals
+
+        # Extract the x,y and z direction polynomial coefficient vectors
+        coeff_x = poly_coeffs[:,0]
+        coeff_y = poly_coeffs[:,1]
+        coeff_z = poly_coeffs[:,2]
+
+        for i,t in enumerate(time_setpoints):
+            seg_idx = min(max(np.searchsorted(self.times, t)-1,0), len(coeff_x) - 1)
+            # Determine the x,y and z position reference points at every refernce time
+            x_vals[i,:] = np.dot(self.compute_poly_matrix(t-self.times[seg_idx])[0],coeff_x[seg_idx*6:(seg_idx+1)*6])
+            y_vals[i,:] = np.dot(self.compute_poly_matrix(t-self.times[seg_idx])[0],coeff_y[seg_idx*6:(seg_idx+1)*6])
+            z_vals[i,:] = np.dot(self.compute_poly_matrix(t-self.times[seg_idx])[0],coeff_z[seg_idx*6:(seg_idx+1)*6])
+            # Determine the x,y and z velocities at every reference time
+            v_x_vals[i,:] = np.dot(self.compute_poly_matrix(t-self.times[seg_idx])[1],coeff_x[seg_idx*6:(seg_idx+1)*6])
+            v_y_vals[i,:] = np.dot(self.compute_poly_matrix(t-self.times[seg_idx])[1],coeff_y[seg_idx*6:(seg_idx+1)*6])
+            v_z_vals[i,:] = np.dot(self.compute_poly_matrix(t-self.times[seg_idx])[1],coeff_z[seg_idx*6:(seg_idx+1)*6])
+            # Determine the x,y and z accelerations at every reference time
+            a_x_vals[i,:] = np.dot(self.compute_poly_matrix(t-self.times[seg_idx])[2],coeff_x[seg_idx*6:(seg_idx+1)*6])
+            a_y_vals[i,:] = np.dot(self.compute_poly_matrix(t-self.times[seg_idx])[2],coeff_y[seg_idx*6:(seg_idx+1)*6])
+            a_z_vals[i,:] = np.dot(self.compute_poly_matrix(t-self.times[seg_idx])[2],coeff_z[seg_idx*6:(seg_idx+1)*6])
+
+        yaw_vals = np.zeros((self.disc_steps*len(self.times),1))
+        trajectory_setpoints = np.hstack((x_vals, y_vals, z_vals, yaw_vals))
+            
+        # Find the maximum absolute velocity during the segment
+        vel_max = np.max(np.sqrt(v_x_vals**2 + v_y_vals**2 + v_z_vals**2))
+        vel_mean = np.mean(np.sqrt(v_x_vals**2 + v_y_vals**2 + v_z_vals**2))
+        acc_max = np.max(np.sqrt(a_x_vals**2 + a_y_vals**2 + a_z_vals**2))
+        acc_mean = np.mean(np.sqrt(a_x_vals**2 + a_y_vals**2 + a_z_vals**2))
+
+        print("Maximum flight speed: " + str(vel_max))
+        print("Average flight speed: " + str(vel_mean))
+        print("Average flight acceleration: " + str(acc_mean))
+        print("Maximum flight acceleration: " + str(acc_max))
+        
+        # Check that it is less than an upper limit velocity v_lim
+        assert vel_max <= self.vel_lim, "The drone velocity exceeds the limit velocity : " + str(vel_max) + " m/s"
+        assert acc_max <= self.acc_lim, "The drone acceleration exceeds the limit acceleration : " + str(acc_max) + " m/s²"
+
+        # ---------------------------------------------------------------------------------------------------- ##
+
+        return trajectory_setpoints, time_setpoints
