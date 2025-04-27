@@ -51,12 +51,13 @@ stupid_path = False
 grid_size = 0.1
 bounds = [0, 9, 0, 9, 0, 4]
 plan_path = False
-set_points = None
-time_points = None
+setpoints = None
+timepoints = None
+reco_timer = 0
 
 def get_command(sensor_data, camera_data, dt):
 
-    global control_command, inside_door, door_pos, turn_counter, initial_pos, offset_correct, stupid_path, path, bounds, grid_size, takeoff, plan_path, set_points, time_points
+    global control_command, inside_door, door_pos, turn_counter, initial_pos, offset_correct, stupid_path, path, bounds, grid_size, takeoff, plan_path, setpoints, timepoints, reco_timer
     # NOTE: Displaying the camera image with cv2.imshow() will throw an error because GUI operations should be performed in the main thread.
     # If you want to display the camera image you can call it main.py.
     # Take off example
@@ -68,6 +69,9 @@ def get_command(sensor_data, camera_data, dt):
     # ---- YOUR CODE HERE ----
     takeoff = True
     # controller = pid.quadrotor_controller(exp_num=3)  # Or 2 or 3 depending on your setup
+
+    if not plan_path:
+        reco_timer += dt
 
     if path[0] == [0,0,0]:
         path[0] = initial_pos
@@ -95,14 +99,14 @@ def get_command(sensor_data, camera_data, dt):
             # waypoints.pop(-1)
             command = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']]
             if not plan_path:
-                planner = MotionPlanner3D(waypoints, [])
-                set_points = planner.trajectory_setpoints
-                time_points = planner.time_setpoints
-                print("Time setpoints: ", time_points)
-                print("Trajectory setpoints: ", set_points)
+                planner = MotionPlanner3D(waypoints, [], reco_timer)
+                setpoints = planner.trajectory_setpoints
+                timepoints = planner.time_setpoints
+                # print("Time setpoints: ", time_points)
+                # print("Trajectory setpoints: ", set_points)
                 plan_path = True
             elif plan_path:
-                command = trajectory_tracking(sensor_data, dt, time_points, set_points, tol=0.2)
+                command = trajectory_tracking(sensor_data, dt, timepoints, setpoints, tol=0.2)
             # waypoints_4D = [wp if len(wp) == 4 else list(wp) + [0.0] for wp in waypoints]
             # time_step = 0.9  # or whatever you prefer
             # timepoints = [i * time_step for i in range(len(waypoints_4D))]
@@ -136,7 +140,7 @@ def get_command(sensor_data, camera_data, dt):
         return rotate(sensor_data, 15)  # Rotate to search for the parallelogram  
     elif purple_color_detected(drawing_frame, pixel_threshold= 40000) and not inside_door:
         inside_door = True
-        if distance(sensor_data, door_pos[-1]) > 1.0:
+        if distance(sensor_data, door_pos[-1]) > 0.9:
             door_pos.append([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']])
             return move_towards_camera_point(sensor_data, [S_WIDTH / 2, S_HEIGHT / 2], camera_data, speed=2)
         else :   
@@ -145,7 +149,7 @@ def get_command(sensor_data, camera_data, dt):
         inside_door = True
         if door_pos[0] == [0,0,0]:
             door_pos[0] = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']]
-        elif distance(sensor_data, door_pos[-1]) > 1.5:
+        elif distance(sensor_data, door_pos[-1]) > 0.9:
             door_pos.append([sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']]) 
             return move_towards_camera_point(sensor_data, [S_WIDTH / 2, S_HEIGHT / 2], camera_data, speed=2)  # Move towards the center of the camera frame
 
@@ -819,21 +823,16 @@ def add_pre_door_waypoints_with_midpoint(waypoints, distance_before=0.3):
 
 class MotionPlanner3D():
     
-    #Question: SIMON PID, what is vel_max set for PID? Check should be same here
-    def __init__(self, path, obstacles):
+    def __init__(self, waypoints, obstacles, reco_timer):
         # Inputs:
-        # - start: The sequence of input path waypoints provided by the path-planner, including the start and final goal position: Vector of m waypoints, consisting of a tuple with three reference positions each as provided by AStar 
-        # - obstacles: 2D array with obstacle locations and obstacle widths [x, y, z, dx, dy, dz]*n_obs
-        # - bounds: The bounds of the environment [x_min, x_max, y_min, y_max, z_min, z_max]
-        # - grid_size: The grid size of the environment (scalar)
-        # - goal: The final goal position of the drone (tuple of 3) 
-        
+        # - waypoints: The sequence of input path waypoints provided by the path-planner, including the start and final goal position: Vector of m waypoints, consisting of an array of 3 elements corresponding to the x, y, z position of the drone 
+        # - obstacles: 2D array with obstacle locations and obstacle widths [x, y, z, dx, dy, dz]*n_obs   
         ## DO NOT MODIFY --------------------------------------------------------------------------------------- ##
-        self.path = path
+        self.path = waypoints
 
         self.trajectory_setpoints = None
 
-        self.init_params(self.path)
+        self.init_params(self.path, reco_timer)
 
         self.run_planner(obstacles, self.path)
 
@@ -848,16 +847,16 @@ class MotionPlanner3D():
 
         ## ---------------------------------------------------------------------------------------------------- ##
 
-    def init_params(self, path_waypoints):
+    def init_params(self, path_waypoints, reco_timer):
 
         # Inputs:
         # - path_waypoints: The sequence of input path waypoints provided by the path-planner, including the start and final goal position: Vector of m waypoints, consisting of a tuple with three reference positions each as provided by AStar
 
         # TUNE THE FOLLOWING PARAMETERS (PART 2) ----------------------------------------------------------------- ##
-        self.disc_steps = 12    # Integer number steps to divide every path segment into to provide the reference positions for PID control # IDEAL: Between 10 and 20
-        self.vel_lim = 9.0        # Velocity limit of the drone (m/s)
-        self.acc_lim = 70.0       # Acceleration limit of the drone (m/s²)
-        t_f = 34                # Final time at the end of the path (s)
+        self.disc_steps = 18    # Integer number steps to divide every path segment into to provide the reference positions for PID control # IDEAL: Between 10 and 20
+        self.vel_lim = 7.0        # Velocity limit of the drone (m/s)
+        self.acc_lim = 50.0       # Acceleration limit of the drone (m/s²)
+        t_f = 36  #2*reco_timer - 7 #               # Final time at the end of the path (s)
 
         # Determine the number of segments of the path
         self.times = np.linspace(0, t_f, len(path_waypoints)) # The time vector at each path waypoint to traverse (Vector of size m) (must be 0 at start)
