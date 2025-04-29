@@ -854,9 +854,14 @@ class MotionPlanner3D():
 
         # TUNE THE FOLLOWING PARAMETERS (PART 2) ----------------------------------------------------------------- ##
         self.disc_steps = 18    # Integer number steps to divide every path segment into to provide the reference positions for PID control # IDEAL: Between 10 and 20
-        self.vel_lim = 7.0        # Velocity limit of the drone (m/s)
-        self.acc_lim = 50.0       # Acceleration limit of the drone (m/s²)
-        t_f = 36  #2*reco_timer - 7 #               # Final time at the end of the path (s)
+        self.vel_lim = 10        # Velocity limit of the drone (m/s)
+        self.acc_lim = 40.0       # Acceleration limit of the drone (m/s²)
+        print("reco_timer", reco_timer)
+        # t_f = min(32,2*reco_timer - 12) #2*reco_timer - 10 #               # Final time at the end of the path (s)
+        if reco_timer < 19.0:
+            t_f = 28
+        else :
+            t_f = 31
 
         # Determine the number of segments of the path
         self.times = np.linspace(0, t_f, len(path_waypoints)) # The time vector at each path waypoint to traverse (Vector of size m) (must be 0 at start)
